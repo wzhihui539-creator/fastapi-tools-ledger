@@ -12,7 +12,7 @@ from app.schemas import ToolCreate, ToolRead
 from app.security import decode_token
 from app.schemas import ToolQuantityUpdate
 from app.schemas import ToolListItem
-
+from urllib.parse import quote
 
 
 router = APIRouter(prefix="/tools", tags=["tools"])
@@ -74,9 +74,6 @@ def export_tools_csv(
             or_(
                 Tool.name.contains(q),
                 Tool.location.contains(q),
-                Tool.vendor.contains(q),
-                Tool.model.contains(q),
-                Tool.remark.contains(q),
             )
         )
     tools = session.exec(stmt).all()
@@ -129,12 +126,17 @@ def export_tools_csv(
     # ✅ 最后一行：导出时间（可选，本地化小彩蛋，不影响Excel读）
     writer.writerow([])
     writer.writerow(["导出时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-
+    cn_filename = "刀具台账.csv"
+    quoted = quote(cn_filename)
+    headers = {
+        # 兜底（给不支持 filename* 的客户端）
+        "Content-Disposition": f"attachment; filename=\"tools.csv\"; filename*=UTF-8''{quoted}"
+    }
     csv_bytes = buf.getvalue().encode("utf-8-sig")  # ✅ Excel 打开中文不乱码
     return Response(
         content=csv_bytes,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="刀具台账.csv"'},
+        headers=headers,
     )
 
 @router.put("/{tool_id}", response_model=ToolRead)
