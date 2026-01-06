@@ -1,15 +1,19 @@
+from datetime import datetime
+import csv
+import io
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
+from fastapi.responses import Response
+from sqlalchemy import or_
 from app.db import get_session
 from app.models import Tool, User
 from app.schemas import ToolCreate, ToolRead
 from app.security import decode_token
 from app.schemas import ToolQuantityUpdate
 from app.schemas import ToolListItem
-import csv
-import io
-from fastapi.responses import Response
+
+
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -60,36 +64,78 @@ def list_tools_lite(
 
 @router.get("/export.csv")
 def export_tools_csv(
+    q: str | None = None,  # ✅ 可选：按关键词导出
     session: Session = Depends(get_session),
     _user: User = Depends(require_user),
 ):
-    tools = session.exec(select(Tool).order_by(Tool.id.asc())).all()
+    stmt = select(Tool).order_by(Tool.id.asc())
+    if q:
+        stmt = stmt.where(
+            or_(
+                Tool.name.contains(q),
+                Tool.location.contains(q),
+                Tool.vendor.contains(q),
+                Tool.model.contains(q),
+                Tool.remark.contains(q),
+            )
+        )
+    tools = session.exec(stmt).all()
 
-    headers = ["id", "name", "location", "quantity", "vendor", "model", "remark", "updated_at"]
+    # 英文字段（取值）
+    fields = ["id", "name", "location", "quantity", "vendor", "model", "remark", "updated_at"]
+    # 中文表头（显示）
+    header_cn = ["编号", "名称", "库位", "数量", "品牌", "型号", "备注", "更新时间"]
+
+    def norm_str(v, default: str) -> str:
+        if v is None:
+            return default
+        s = str(v).strip()
+        return s if s else default
+
+    def norm_int(v, default: int = 0) -> int:
+        if v is None:
+            return default
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    def norm_dt(v) -> str:
+        if v is None:
+            return ""
+        if hasattr(v, "isoformat"):
+            return v.isoformat(sep=" ", timespec="seconds")
+        return str(v)
 
     buf = io.StringIO(newline="")
     writer = csv.writer(buf)
-    writer.writerow(headers)
+
+    # ✅ 第一行：中文列名
+    writer.writerow(header_cn)
 
     for t in tools:
-        d = t.model_dump()  # ✅ 不存在的字段不会直接炸
+        d = t.model_dump()
         row = []
-        for h in headers:
-            v = d.get(h, "")
-            # datetime 友好输出
-            if hasattr(v, "isoformat"):
-                v = v.isoformat(sep=" ", timespec="seconds")
-            row.append(v)
+        row.append(norm_int(d.get("id"), 0))                      # 编号
+        row.append(norm_str(d.get("name"), "未命名"))              # 名称
+        row.append(norm_str(d.get("location"), "未知"))            # 库位
+        row.append(norm_int(d.get("quantity"), 0))                 # 数量
+        row.append(norm_str(d.get("vendor"), ""))                  # 品牌
+        row.append(norm_str(d.get("model"), ""))                   # 型号
+        row.append(norm_str(d.get("remark"), ""))                  # 备注
+        row.append(norm_dt(d.get("updated_at")))                   # 更新时间
         writer.writerow(row)
 
-    csv_bytes = buf.getvalue().encode("utf-8-sig")  # ✅ Excel 友好（带 BOM）
+    # ✅ 最后一行：导出时间（可选，本地化小彩蛋，不影响Excel读）
+    writer.writerow([])
+    writer.writerow(["导出时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+
+    csv_bytes = buf.getvalue().encode("utf-8-sig")  # ✅ Excel 打开中文不乱码
     return Response(
         content=csv_bytes,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="tools.csv"'},
+        headers={"Content-Disposition": 'attachment; filename="刀具台账.csv"'},
     )
-
-
 
 @router.put("/{tool_id}", response_model=ToolRead)
 def update_tool(
