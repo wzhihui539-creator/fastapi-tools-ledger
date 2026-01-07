@@ -27,4 +27,13 @@ class ToolQuantityUpdate(BaseModel):
 class ToolListItem(BaseModel):
     id: int
     name: str
+    location: str | None = None
     quantity: int
+
+
+class ToolListResponse(BaseModel):
+    items: list[ToolListItem]
+    total: int
+    limit: int
+    offset: int
+    q: str | None = None

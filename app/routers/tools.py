@@ -1,26 +1,26 @@
 from datetime import datetime
 import csv
 import io
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 from fastapi.responses import Response
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from app.db import get_session
 from app.models import Tool, User
-from app.schemas import ToolCreate, ToolRead
+from app.schemas import ToolCreate, ToolRead, ToolListResponse
 from app.security import decode_token
 from app.schemas import ToolQuantityUpdate
 from app.schemas import ToolListItem
 from urllib.parse import quote
 
-
 router = APIRouter(prefix="/tools", tags=["tools"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
+
 def require_user(
-    token: str = Depends(oauth2_scheme),
-    session: Session = Depends(get_session),
+        token: str = Depends(oauth2_scheme),
+        session: Session = Depends(get_session),
 ) -> User:
     try:
         username = decode_token(token)
@@ -32,11 +32,12 @@ def require_user(
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
+
 @router.post("", response_model=ToolRead)
 def create_tool(
-    data: ToolCreate,
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        data: ToolCreate,
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     tool = Tool(name=data.name, location=data.location, quantity=data.quantity)
     session.add(tool)
@@ -44,19 +45,60 @@ def create_tool(
     session.refresh(tool)
     return tool
 
-@router.get("", response_model=list[ToolRead])
-def list_tools(
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
-):
-    return session.exec(select(Tool).order_by(Tool.id.desc())).all()
 
+@router.get("", response_model=ToolListResponse)
+def list_tools(
+        q: str | None = None,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        sort: str = Query(
+            "id_desc",
+            description="排序：id_desc/id_asc/name_asc/name_desc/qty_asc/qty_desc",
+        ),
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
+):
+    conds = []
+    if q:
+        conds.append(or_(Tool.name.contains(q), Tool.location.contains(q)))
+
+    # total
+    count_stmt = select(func.count()).select_from(Tool)
+    if conds:
+        count_stmt = count_stmt.where(*conds)
+    total = session.exec(count_stmt).one()
+
+    # order by
+    order_map = {
+        "id_desc": Tool.id.desc(),
+        "id_asc": Tool.id.asc(),
+        "name_asc": Tool.name.asc(),
+        "name_desc": Tool.name.desc(),
+        "qty_asc": Tool.quantity.asc(),
+        "qty_desc": Tool.quantity.desc(),
+    }
+    order_by = order_map.get(sort, Tool.id.desc())
+
+    # items
+    items_stmt = select(Tool)
+    if conds:
+        items_stmt = items_stmt.where(*conds)
+
+    items = session.exec(items_stmt.order_by(order_by).offset(offset).limit(limit)).all()
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "q": q,
+    }
 
 
 @router.get("/lite", response_model=list[ToolListItem])
 def list_tools_lite(
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     stmt = select(Tool).order_by(Tool.id.desc())
     return session.exec(stmt).all()
@@ -64,9 +106,9 @@ def list_tools_lite(
 
 @router.get("/export.csv")
 def export_tools_csv(
-    q: str | None = None,  # ✅ 可选：按关键词导出
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        q: str | None = None,  # ✅ 可选：按关键词导出
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     stmt = select(Tool).order_by(Tool.id.asc())
     if q:
@@ -113,14 +155,14 @@ def export_tools_csv(
     for t in tools:
         d = t.model_dump()
         row = []
-        row.append(norm_int(d.get("id"), 0))                      # 编号
-        row.append(norm_str(d.get("name"), "未命名"))              # 名称
-        row.append(norm_str(d.get("location"), "未知"))            # 库位
-        row.append(norm_int(d.get("quantity"), 0))                 # 数量
-        row.append(norm_str(d.get("vendor"), ""))                  # 品牌
-        row.append(norm_str(d.get("model"), ""))                   # 型号
-        row.append(norm_str(d.get("remark"), ""))                  # 备注
-        row.append(norm_dt(d.get("updated_at")))                   # 更新时间
+        row.append(norm_int(d.get("id"), 0))  # 编号
+        row.append(norm_str(d.get("name"), "未命名"))  # 名称
+        row.append(norm_str(d.get("location"), "未知"))  # 库位
+        row.append(norm_int(d.get("quantity"), 0))  # 数量
+        row.append(norm_str(d.get("vendor"), ""))  # 品牌
+        row.append(norm_str(d.get("model"), ""))  # 型号
+        row.append(norm_str(d.get("remark"), ""))  # 备注
+        row.append(norm_dt(d.get("updated_at")))  # 更新时间
         writer.writerow(row)
 
     # ✅ 最后一行：导出时间（可选，本地化小彩蛋，不影响Excel读）
@@ -139,12 +181,13 @@ def export_tools_csv(
         headers=headers,
     )
 
+
 @router.put("/{tool_id}", response_model=ToolRead)
 def update_tool(
-    tool_id: int,
-    data: ToolCreate,
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        tool_id: int,
+        data: ToolCreate,
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
     if not tool:
@@ -160,11 +203,13 @@ def update_tool(
 
 @router.delete("/{tool_id}")
 def delete_tool(
-    tool_id: int,
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        tool_id: int,
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
+    # 查询资源：session.get(Tool, tool_id)
+    # 通过 tool_id 从数据库中查询 Tool 模型对应的记录（get 方法按主键查询，效率高于 filter）
     if not tool:
         raise HTTPException(status_code=404, detail="Not found")
     session.delete(tool)
@@ -174,10 +219,10 @@ def delete_tool(
 
 @router.patch("/{tool_id}/quantity", response_model=ToolRead)
 def update_tool_quantity(
-    tool_id: int,
-    body: ToolQuantityUpdate,
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        tool_id: int,
+        body: ToolQuantityUpdate,
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
     if not tool:
@@ -189,14 +234,14 @@ def update_tool_quantity(
     session.refresh(tool)
     return tool
 
+
 @router.get("/{tool_id}", response_model=ToolRead)
 def get_tool(
-    tool_id: int,
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        tool_id: int,
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail="Not found")
     return tool
-
