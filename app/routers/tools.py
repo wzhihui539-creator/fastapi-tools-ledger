@@ -7,30 +7,15 @@ from sqlmodel import Session, select
 from fastapi.responses import Response
 from sqlalchemy import func, or_
 from app.db import get_session
-from app.models import Tool, User
+from app.models import Tool, User, ToolMovement
 from app.schemas import ToolCreate, ToolRead, ToolListResponse
-from app.security import decode_token
 from app.schemas import ToolQuantityUpdate
 from app.schemas import ToolListItem
+from app.deps import require_user
 from urllib.parse import quote
 
+
 router = APIRouter(prefix="/tools", tags=["tools"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-
-def require_user(
-        token: str = Depends(oauth2_scheme),
-        session: Session = Depends(get_session),
-) -> User:
-    try:
-        username = decode_token(token)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = session.exec(select(User).where(User.username == username)).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user
 
 
 @router.post("", response_model=ToolRead)
@@ -227,9 +212,29 @@ def update_tool_quantity(
     tool = session.get(Tool, tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Tool not found"})
+    if body.delta == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "delta cannot be 0"},
+        )
+    old_qty = tool.quantity
+    new_qty = old_qty + body.delta
+    if new_qty < 0:
+        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "Quantity cannot go below 0"})
 
-    tool.quantity += body.delta
+    tool.quantity = new_qty
+    tool.updated_at = datetime.utcnow()
+
+    mv = ToolMovement(
+        tool_id=tool_id,
+        action="ADJUST",
+        delta=body.delta,
+        note=body.note,
+        operator=_user.username,
+    )
+
     session.add(tool)
+    session.add(mv)
     session.commit()
     session.refresh(tool)
     return tool

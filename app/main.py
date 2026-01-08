@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.db import create_db_and_tables
-from app.routers import auth, tools
+from app.routers import auth, tools, movements
 
 class Settings(BaseSettings):
     # 声明.env里会出现的字段
@@ -27,6 +27,7 @@ app = FastAPI(title="FastAPI Starter - Tools Ledger", lifespan=lifespan)
 
 app.include_router(auth.router)
 app.include_router(tools.router)
+app.include_router(movements.router)
 
 @app.get("/health")
 def health():
