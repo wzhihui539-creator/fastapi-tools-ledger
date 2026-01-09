@@ -89,6 +89,7 @@ def list_tools_lite(
     return session.exec(stmt).all()
 
 
+30
 @router.get("/export.csv")
 def export_tools_csv(
         q: str | None = None,  # ✅ 可选：按关键词导出
@@ -202,35 +203,59 @@ def delete_tool(
     return {"ok": True}
 
 
+from datetime import datetime
+from app.models import ToolMovement
+
 @router.patch("/{tool_id}/quantity", response_model=ToolRead)
 def update_tool_quantity(
         tool_id: int,
         body: ToolQuantityUpdate,
         session: Session = Depends(get_session),
-        _user: User = Depends(require_user),
+        user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Tool not found"})
+
     if body.delta == 0:
         raise HTTPException(
             status_code=400,
             detail={"code": "BAD_REQUEST", "message": "delta cannot be 0"},
         )
+
     old_qty = tool.quantity
     new_qty = old_qty + body.delta
     if new_qty < 0:
         raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "Quantity cannot go below 0"})
+
+    # action：根据 delta 自动推断
+    if body.delta > 0:
+        action = "IN"
+    elif body.delta < 0:
+        action = "OUT"
+    # 写这条只是为了看着更直观，永远不会出现，前边被拦住了，如果delta=0会被拦住400报警
+    else:
+        action = "ADJUST"
+
+    # note：你没填就自动生成一条“台账风格”的备注
+    note = (body.note or "").strip()
+    if not note:
+        if action == "IN":
+            note = f"入库 +{body.delta}（{old_qty}->{new_qty}）"
+        elif action == "OUT":
+            note = f"出库 {body.delta}（{old_qty}->{new_qty}）"  # delta 本身是负数，直观看
+        else:
+            note = f"盘点调整（{old_qty}->{new_qty}）"
 
     tool.quantity = new_qty
     tool.updated_at = datetime.utcnow()
 
     mv = ToolMovement(
         tool_id=tool_id,
-        action="ADJUST",
+        action=action,
         delta=body.delta,
-        note=body.note,
-        operator=_user.username,
+        note=note,
+        operator=user.username,
     )
 
     session.add(tool)
@@ -238,6 +263,7 @@ def update_tool_quantity(
     session.commit()
     session.refresh(tool)
     return tool
+
 
 
 @router.get("/{tool_id}", response_model=ToolRead)

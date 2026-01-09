@@ -6,6 +6,7 @@ from app.db import get_session
 from app.models import User
 from app.schemas import UserCreate, Token
 from app.security import hash_password, verify_password, create_access_token
+from app.error import _auth_401
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -81,7 +82,7 @@ def login(
 ):
     user = session.exec(select(User).where(User.username == form_data.username)).first()
     if (not user) or (not verify_password(form_data.password, user.password_hash)):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise _auth_401("INVALID_CREDENTIALS", "用户名或密码错误")
 
     token = create_access_token(user.username)
     return {"access_token": token, "token_type": "bearer"}

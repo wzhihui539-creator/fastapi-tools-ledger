@@ -6,8 +6,7 @@ from app.db import get_session
 from app.models import Tool, User, ToolMovement
 from app.schemas import MovementCreate, MovementRead, MovementListResponse
 
-# 复用你现有的 require_user（现在在 tools.py）
-from app.routers.tools import require_user
+from app.deps import require_user
 
 router = APIRouter(prefix="/movements", tags=["movements"])
 
