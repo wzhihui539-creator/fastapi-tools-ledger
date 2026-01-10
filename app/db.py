@@ -1,4 +1,7 @@
 from sqlmodel import SQLModel, Session, create_engine
+from fastapi import HTTPException
+import uuid
+
 
 DATABASE_URL = "sqlite:///./app.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -7,8 +10,22 @@ def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(engine)
 
 def get_session():
-    with Session(engine) as session:
+    sid = uuid.uuid4().hex[:6]
+    # print(f">>> open session {sid}")
+    session = Session(engine)
+    try:
         yield session
+    except HTTPException:
+        # ✅ 业务/鉴权错误：直接抛出，不做 rollback（通常没必要）
+        raise
+    except Exception:
+        # ✅ 其他异常：更像程序错误/DB错误，回滚更合理
+        session.rollback()
+        print("rollback")
+        raise
+    finally:
+        session.close()
+        # print(f"<<< close session {sid}")
 """
 这是一个 Python 中基于 SQLAlchemy（ORM 框架）的**数据库会话生成器函数**，核心作用是安全、复用性地创建数据库会话（Session），简要解析如下：
 

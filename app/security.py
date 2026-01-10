@@ -46,5 +46,5 @@ def decode_token(token: str) -> str:
     # ✅ 可选：如果你写了 type，就顺手检查一下（不想严格也可以删掉）
     if payload.get("type") not in (None, "access"):
         raise ValueError("Invalid token type")
-    print(jwt.decode(token, secret, algorithms=["HS256"]))
+    # print(jwt.decode(token, secret, algorithms=["HS256"]))
     return sub

@@ -18,17 +18,40 @@ from urllib.parse import quote
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
+from app.models import Tool, ToolMovement, User  # 确保引入 ToolMovement
+
 @router.post("", response_model=ToolRead)
 def create_tool(
         data: ToolCreate,
         session: Session = Depends(get_session),
         _user: User = Depends(require_user),
 ):
-    tool = Tool(name=data.name, location=data.location, quantity=data.quantity)
+    tool = Tool(
+        name=data.name,
+        location=data.location,
+        quantity=data.quantity,
+    )
     session.add(tool)
+
+    # ✅ flush 让 tool.id 生成，但不提交
+    session.flush()
+
+    # ✅ 新建即入库：写一条流水
+    mv = ToolMovement(
+        tool_id=tool.id,
+        action="IN",
+        delta=tool.quantity,
+        note="新建入库",
+        operator=_user.username,
+    )
+    session.add(mv)
+
+    # ✅ 一次提交，保证原子性
     session.commit()
+
     session.refresh(tool)
     return tool
+
 
 
 @router.get("", response_model=ToolListResponse)
