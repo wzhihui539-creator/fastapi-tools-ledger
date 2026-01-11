@@ -1,6 +1,7 @@
+from typing import Optional
+from enum import Enum
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Literal, Optional
 
 
 class UserCreate(BaseModel):
@@ -47,9 +48,15 @@ class ToolListResponse(BaseModel):
     q: str | None = None
 
 
+class MovementAction(str, Enum):
+    IN = "IN"
+    OUT = "OUT"
+    ADJUST = "ADJUST"
+
+
 class MovementCreate(BaseModel):
     tool_id: int
-    action: Literal["IN", "OUT", "ADJUST"]
+    action: MovementAction
     delta: int
     note: Optional[str] = None
 
@@ -57,7 +64,7 @@ class MovementCreate(BaseModel):
 class MovementRead(BaseModel):
     id: int
     tool_id: int
-    action: str
+    action: MovementAction
     delta: int
     note: Optional[str] = None
     operator: str

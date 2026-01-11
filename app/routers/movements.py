@@ -4,7 +4,8 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.models import Tool, User, ToolMovement
-from app.schemas import MovementCreate, MovementRead, MovementListResponse
+from app.schemas import MovementCreate, MovementRead, MovementListResponse, MovementAction
+
 
 from app.deps import require_user
 
@@ -21,23 +22,28 @@ def create_movement(
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 
-    # 小约束：让 delta 和 action 更直观（不想要也可以删掉这段）
-    if data.action == "IN" and data.delta <= 0:
-        raise HTTPException(status_code=400, detail="IN requires delta > 0")
-    if data.action == "OUT" and data.delta >= 0:
-        raise HTTPException(status_code=400, detail="OUT requires delta < 0")
+    # 规则校验：用 Enum 比较
+    if data.action in (MovementAction.IN, MovementAction.OUT) and data.delta <= 0:
+        raise HTTPException(status_code=400, detail="delta must be > 0")
 
-    new_qty = tool.quantity + data.delta
-    if new_qty < 0:
-        raise HTTPException(status_code=400, detail="Quantity cannot go below 0")
+    if data.action == MovementAction.ADJUST and data.delta == 0:
+        raise HTTPException(status_code=400, detail="ADJUST requires delta != 0")
 
-    tool.quantity = new_qty
-    tool.updated_at = __import__("datetime").datetime.utcnow()  # 保持你项目风格：utcnow（无时区）
+    if data.action == MovementAction.IN:
+        signed_delta = data.delta
+    elif data.action == MovementAction.OUT:
+        signed_delta = -data.delta
+    else:
+        signed_delta = data.delta
+
+    tool.quantity += signed_delta
+    if tool.quantity < 0:
+        raise HTTPException(status_code=400, detail="Insufficient stock")
 
     mv = ToolMovement(
-        tool_id=data.tool_id,
-        action=data.action,
-        delta=data.delta,
+        tool_id=tool.id,
+        action=data.action.value,   # ✅ Enum -> str 入库
+        delta=signed_delta,   # ✅ 这里必须是 signed_delta
         note=data.note,
         operator=user.username,
     )
@@ -50,15 +56,31 @@ def create_movement(
 
 
 @router.get("", response_model=MovementListResponse)
+@router.get("", response_model=MovementListResponse)
 def list_movements(
+    tool_id: int | None = None,
+    action: MovementAction | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),
     _user: User = Depends(require_user),
 ):
-    total = session.exec(select(func.count()).select_from(ToolMovement)).one()
+    stmt = select(ToolMovement)
+    count_stmt = select(func.count()).select_from(ToolMovement)
+
+    if tool_id is not None:
+        stmt = stmt.where(ToolMovement.tool_id == tool_id)
+        count_stmt = count_stmt.where(ToolMovement.tool_id == tool_id)
+
+    if action is not None:
+        stmt = stmt.where(ToolMovement.action == action.value)         # ✅ Enum -> str
+        count_stmt = count_stmt.where(ToolMovement.action == action.value)
+
+    total = session.exec(count_stmt).one()
     items = session.exec(
-        select(ToolMovement).order_by(ToolMovement.id.desc()).offset(offset).limit(limit)
+        stmt.order_by(ToolMovement.id.desc()).offset(offset).limit(limit)
     ).all()
 
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
