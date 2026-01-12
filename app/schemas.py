@@ -28,11 +28,6 @@ class ToolRead(BaseModel):
     updated_at: datetime
 
 
-class ToolQuantityUpdate(BaseModel):
-    delta: int = Field(..., ge=-100000, le=100000, description="数量变更（可正可负）")
-    note: str | None = Field(default=None, description="备注：变更原因（可选）")
-
-
 class ToolListItem(BaseModel):
     id: int
     name: str
@@ -69,6 +64,22 @@ class MovementRead(BaseModel):
     note: Optional[str] = None
     operator: str
     created_at: datetime
+
+
+class ToolQuantityUpdate(BaseModel):
+    action: MovementAction = Field(..., description="IN/OUT/ADJUST")
+    delta: int = Field(..., ge=0, le=100000, description="IN/OUT=变更量(>0)，ADJUST=目标库存(>=0)")
+    note: Optional[str] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"action": "IN", "delta": 5, "note": "入库5"},
+                {"action": "OUT", "delta": 3, "note": "出库3"},
+                {"action": "ADJUST", "delta": 0, "note": "清点归零"},
+            ]
+        }
+    }
 
 
 class MovementListResponse(BaseModel):

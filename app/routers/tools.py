@@ -7,18 +7,15 @@ from sqlmodel import Session, select
 from fastapi.responses import Response
 from sqlalchemy import func, or_
 from app.db import get_session
-from app.models import Tool, User, ToolMovement
-from app.schemas import ToolCreate, ToolRead, ToolListResponse
+from app.schemas import ToolCreate, ToolRead, ToolListResponse,MovementAction
 from app.schemas import ToolQuantityUpdate
 from app.schemas import ToolListItem
 from app.deps import require_user
 from urllib.parse import quote
-
+from app.models import Tool, User  # 确保引入 ToolMovement
+from app.services.ledger import calc_signed_delta_and_new_qty, build_note, abort
 
 router = APIRouter(prefix="/tools", tags=["tools"])
-
-
-from app.models import Tool, ToolMovement, User  # 确保引入 ToolMovement
 
 @router.post("", response_model=ToolRead)
 def create_tool(
@@ -32,26 +29,21 @@ def create_tool(
         quantity=data.quantity,
     )
     session.add(tool)
+    session.flush()  # 生成 tool.id
 
-    # ✅ flush 让 tool.id 生成，但不提交
-    session.flush()
+    if tool.quantity > 0:
+        mv = ToolMovement(
+            tool_id=tool.id,
+            action=MovementAction.IN.value,  # ✅ 统一口径
+            delta=tool.quantity,
+            note="新建入库",
+            operator=_user.username,
+        )
+        session.add(mv)
 
-    # ✅ 新建即入库：写一条流水
-    mv = ToolMovement(
-        tool_id=tool.id,
-        action="IN",
-        delta=tool.quantity,
-        note="新建入库",
-        operator=_user.username,
-    )
-    session.add(mv)
-
-    # ✅ 一次提交，保证原子性
     session.commit()
-
     session.refresh(tool)
     return tool
-
 
 
 @router.get("", response_model=ToolListResponse)
@@ -191,20 +183,35 @@ def export_tools_csv(
     )
 
 
-@router.put("/{tool_id}", response_model=ToolRead)
-def update_tool(
-        tool_id: int,
-        data: ToolCreate,
-        session: Session = Depends(get_session),
-        _user: User = Depends(require_user),
+@router.patch("/{tool_id}/quantity", response_model=ToolRead)
+def update_tool_quantity(
+    tool_id: int,
+    body: ToolQuantityUpdate,
+    session: Session = Depends(get_session),
+    user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
     if not tool:
-        raise HTTPException(status_code=404, detail="Not found")
-    tool.name = data.name
-    tool.location = data.location
-    tool.quantity = data.quantity
+        abort(404, "NOT_FOUND", "Tool not found")
+
+    old_qty = tool.quantity
+    signed_delta, new_qty = calc_signed_delta_and_new_qty(body.action, body.delta, old_qty)
+
+    tool.quantity = new_qty
+    tool.updated_at = datetime.utcnow()
+
+    note = build_note(body.action, body.delta, old_qty, new_qty, body.note)
+
+    mv = ToolMovement(
+        tool_id=tool.id,
+        action=body.action.value,
+        delta=signed_delta,
+        note=note,
+        operator=user.username,
+    )
+
     session.add(tool)
+    session.add(mv)
     session.commit()
     session.refresh(tool)
     return tool
@@ -231,52 +238,65 @@ from app.models import ToolMovement
 
 @router.patch("/{tool_id}/quantity", response_model=ToolRead)
 def update_tool_quantity(
-        tool_id: int,
-        body: ToolQuantityUpdate,
-        session: Session = Depends(get_session),
-        user: User = Depends(require_user),
+    tool_id: int,
+    body: ToolQuantityUpdate,
+    session: Session = Depends(get_session),
+    user: User = Depends(require_user),
 ):
     tool = session.get(Tool, tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Tool not found"})
 
-    if body.delta == 0:
+    old_qty = tool.quantity
+
+    # 统一口径：delta 永远是正数（或 0）
+    if body.action in (MovementAction.IN, MovementAction.OUT) and body.delta <= 0:
+        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "IN/OUT 的 delta 必须 > 0"})
+
+    if body.action == MovementAction.ADJUST and body.delta < 0:
+        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "ADJUST 的 delta 必须 >= 0"})
+
+    # 计算 new_qty + signed_delta（写流水用 signed_delta）
+    if body.action == MovementAction.IN:
+        new_qty = old_qty + body.delta
+        signed_delta = body.delta
+
+    elif body.action == MovementAction.OUT:
+        new_qty = old_qty - body.delta
+        signed_delta = -body.delta
+
+    else:  # ADJUST：delta 代表目标库存
+        new_qty = body.delta
+        signed_delta = new_qty - old_qty
+
+    # ✅ 复用规则：库存不能为负（OUT 会触发；ADJUST 这里 new_qty 已>=0）
+    if new_qty < 0:
         raise HTTPException(
             status_code=400,
-            detail={"code": "BAD_REQUEST", "message": "delta cannot be 0"},
+            detail={"code": "INSUFFICIENT_STOCK", "message": f"库存不足：当前 {old_qty}，要出库 {body.delta}"},
         )
 
-    old_qty = tool.quantity
-    new_qty = old_qty + body.delta
-    if new_qty < 0:
-        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "Quantity cannot go below 0"})
+    # ADJUST 没变化就没必要记（你也可以允许，但我建议拦一下）
+    if signed_delta == 0:
+        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "数量没有变化，无需提交"})
 
-    # action：根据 delta 自动推断
-    if body.delta > 0:
-        action = "IN"
-    elif body.delta < 0:
-        action = "OUT"
-    # 写这条只是为了看着更直观，永远不会出现，前边被拦住了，如果delta=0会被拦住400报警
-    else:
-        action = "ADJUST"
-
-    # note：你没填就自动生成一条“台账风格”的备注
+    # 自动 note
     note = (body.note or "").strip()
     if not note:
-        if action == "IN":
+        if body.action == MovementAction.IN:
             note = f"入库 +{body.delta}（{old_qty}->{new_qty}）"
-        elif action == "OUT":
-            note = f"出库 {body.delta}（{old_qty}->{new_qty}）"  # delta 本身是负数，直观看
+        elif body.action == MovementAction.OUT:
+            note = f"出库 {body.delta}（{old_qty}->{new_qty}）"
         else:
-            note = f"盘点调整（{old_qty}->{new_qty}）"
+            note = f"盘点调整为 {new_qty}（{old_qty}->{new_qty}）"
 
     tool.quantity = new_qty
     tool.updated_at = datetime.utcnow()
 
     mv = ToolMovement(
-        tool_id=tool_id,
-        action=action,
-        delta=body.delta,
+        tool_id=tool.id,               # tool_id / tool.id 都行，这里用 tool.id
+        action=body.action.value,      # Enum -> str 入库
+        delta=signed_delta,            # ✅ 存“带符号”的真实变化量
         note=note,
         operator=user.username,
     )

@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlmodel import Session, select
-
+from datetime import datetime
 from app.db import get_session
 from app.models import Tool, User, ToolMovement
 from app.schemas import MovementCreate, MovementRead, MovementListResponse, MovementAction
-
+from app.services.ledger import calc_signed_delta_and_new_qty, build_note, abort
 
 from app.deps import require_user
 
@@ -20,31 +20,21 @@ def create_movement(
 ):
     tool = session.get(Tool, data.tool_id)
     if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+        abort(404, "NOT_FOUND", "Tool not found")
 
-    # 规则校验：用 Enum 比较
-    if data.action in (MovementAction.IN, MovementAction.OUT) and data.delta <= 0:
-        raise HTTPException(status_code=400, detail="delta must be > 0")
+    old_qty = tool.quantity
+    signed_delta, new_qty = calc_signed_delta_and_new_qty(data.action, data.delta, old_qty)
 
-    if data.action == MovementAction.ADJUST and data.delta == 0:
-        raise HTTPException(status_code=400, detail="ADJUST requires delta != 0")
+    tool.quantity = new_qty
+    tool.updated_at = datetime.utcnow()
 
-    if data.action == MovementAction.IN:
-        signed_delta = data.delta
-    elif data.action == MovementAction.OUT:
-        signed_delta = -data.delta
-    else:
-        signed_delta = data.delta
-
-    tool.quantity += signed_delta
-    if tool.quantity < 0:
-        raise HTTPException(status_code=400, detail="Insufficient stock")
+    note = build_note(data.action, data.delta, old_qty, new_qty, data.note)
 
     mv = ToolMovement(
         tool_id=tool.id,
-        action=data.action.value,   # ✅ Enum -> str 入库
-        delta=signed_delta,   # ✅ 这里必须是 signed_delta
-        note=data.note,
+        action=data.action.value,   # Enum -> str
+        delta=signed_delta,         # ✅ 永远存“真实变化量”
+        note=note,
         operator=user.username,
     )
 
@@ -54,16 +44,15 @@ def create_movement(
     session.refresh(mv)
     return mv
 
-
 @router.get("", response_model=MovementListResponse)
 @router.get("", response_model=MovementListResponse)
 def list_movements(
-    tool_id: int | None = None,
-    action: MovementAction | None = None,
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    session: Session = Depends(get_session),
-    _user: User = Depends(require_user),
+        tool_id: int | None = None,
+        action: MovementAction | None = None,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        session: Session = Depends(get_session),
+        _user: User = Depends(require_user),
 ):
     stmt = select(ToolMovement)
     count_stmt = select(func.count()).select_from(ToolMovement)
@@ -73,7 +62,7 @@ def list_movements(
         count_stmt = count_stmt.where(ToolMovement.tool_id == tool_id)
 
     if action is not None:
-        stmt = stmt.where(ToolMovement.action == action.value)         # ✅ Enum -> str
+        stmt = stmt.where(ToolMovement.action == action.value)  # ✅ Enum -> str
         count_stmt = count_stmt.where(ToolMovement.action == action.value)
 
     total = session.exec(count_stmt).one()
@@ -82,5 +71,3 @@ def list_movements(
     ).all()
 
     return {"items": items, "total": total, "limit": limit, "offset": offset}
-
-
