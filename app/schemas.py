@@ -65,6 +65,12 @@ class MovementRead(BaseModel):
     operator: str
     created_at: datetime
 
+class MovementSort(str, Enum):
+    id_desc = "id_desc"
+    id_asc = "id_asc"
+    created_desc = "created_desc"
+    created_asc = "created_asc"
+
 
 class ToolQuantityUpdate(BaseModel):
     action: MovementAction = Field(..., description="IN/OUT/ADJUST")
