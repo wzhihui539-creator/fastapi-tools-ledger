@@ -14,6 +14,9 @@ from app.deps import require_user
 from urllib.parse import quote
 from app.models import Tool, User  # 确保引入 ToolMovement
 from app.services.ledger import calc_signed_delta_and_new_qty, build_note, abort
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -104,12 +107,11 @@ def list_tools_lite(
     return session.exec(stmt).all()
 
 
-
-@router.get("/export.csv")
-def export_tools_csv(
-        q: str | None = None,  # ✅ 可选：按关键词导出
-        session: Session = Depends(get_session),
-        _user: User = Depends(require_user),
+@router.get("/export.xlsx")
+def export_tools_xlsx(
+    q: str | None = None,
+    session: Session = Depends(get_session),
+    _user: User = Depends(require_user),
 ):
     stmt = select(Tool).order_by(Tool.id.asc())
     if q:
@@ -121,9 +123,6 @@ def export_tools_csv(
         )
     tools = session.exec(stmt).all()
 
-    # 英文字段（取值）
-    fields = ["id", "name", "location", "quantity", "vendor", "model", "remark", "updated_at"]
-    # 中文表头（显示）
     header_cn = ["编号", "名称", "库位", "数量", "品牌", "型号", "备注", "更新时间"]
 
     def norm_str(v, default: str) -> str:
@@ -140,45 +139,101 @@ def export_tools_csv(
         except Exception:
             return default
 
-    def norm_dt(v) -> str:
+    def norm_dt_obj(v):
         if v is None:
-            return ""
-        if hasattr(v, "isoformat"):
-            return v.isoformat(sep=" ", timespec="seconds")
-        return str(v)
+            return None
+        if isinstance(v, datetime):
+            return v.replace(tzinfo=None) if v.tzinfo else v
+        return None
 
-    buf = io.StringIO(newline="")
-    writer = csv.writer(buf)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "刀具台账"
 
-    # ✅ 第一行：中文列名
-    writer.writerow(header_cn)
+    # 表头样式（依旧保留，Table 也会有样式，但这让首行更“台账”）
+    header_font = Font(bold=True)
+    header_fill = PatternFill("solid", fgColor="DDDDDD")
+    header_align = Alignment(horizontal="center", vertical="center")
 
+    ws.append(header_cn)
+    ws.row_dimensions[1].height = 26  # 表头行高度（可改成 24/26 更“厚”）
+    for col in range(1, len(header_cn) + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+
+    # 数据行
     for t in tools:
         d = t.model_dump()
-        row = []
-        row.append(norm_int(d.get("id"), 0))  # 编号
-        row.append(norm_str(d.get("name"), "未命名"))  # 名称
-        row.append(norm_str(d.get("location"), "未知"))  # 库位
-        row.append(norm_int(d.get("quantity"), 0))  # 数量
-        row.append(norm_str(d.get("vendor"), ""))  # 品牌
-        row.append(norm_str(d.get("model"), ""))  # 型号
-        row.append(norm_str(d.get("remark"), ""))  # 备注
-        row.append(norm_dt(d.get("updated_at")))  # 更新时间
-        writer.writerow(row)
+        ws.append([
+            norm_int(d.get("id"), 0),
+            norm_str(d.get("name"), "未命名"),
+            norm_str(d.get("location"), "未知"),
+            norm_int(d.get("quantity"), 0),
+            norm_str(d.get("vendor"), ""),
+            norm_str(d.get("model"), ""),
+            norm_str(d.get("remark"), ""),
+            norm_dt_obj(d.get("updated_at")),
+        ])
 
-    # ✅ 最后一行：导出时间（可选，本地化小彩蛋，不影响Excel读）
-    writer.writerow([])
-    writer.writerow(["导出时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-    cn_filename = "刀具台账.csv"
+    data_end_row = 1 + len(tools)  # 表头+数据
+
+    # ✅ 冻结首行
+    ws.freeze_panes = "A2"
+
+    # ✅ 列格式：数量/更新时间
+    for r in range(2, data_end_row + 1):
+        ws.cell(row=r, column=4).number_format = "0"  # 数量
+        ws.cell(row=r, column=8).number_format = "yyyy-mm-dd hh:mm:ss"  # 更新时间
+
+    # ✅ 列宽（稳定台账风格）
+    col_widths = {
+        "A": 8,   # 编号
+        "B": 22,  # 名称
+        "C": 12,  # 库位
+        "D": 8,   # 数量
+        "E": 12,  # 品牌
+        "F": 16,  # 型号
+        "G": 28,  # 备注
+        "H": 20,  # 更新时间
+    }
+    for k, w in col_widths.items():
+        ws.column_dimensions[k].width = w
+
+    # ✅ 加 Table 样式（只覆盖表头+数据）
+    # 如果没有数据，也至少给到表头行，避免范围非法
+    last_row = max(1, data_end_row)
+    table_ref = f"A1:H{last_row}"
+
+    table = Table(displayName="ToolsLedger", ref=table_ref)
+    style = TableStyleInfo(
+        name="TableStyleMedium9",   # 你也可以换成 Medium2/Medium10 等
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,        # ✅ 条纹行
+        showColumnStripes=False,
+    )
+    table.tableStyleInfo = style
+    ws.add_table(table)
+
+    # 末尾：导出时间（不在 Table 范围里）
+    ws.append([])
+    ws.append(["导出时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    cn_filename = "刀具台账.xlsx"
     quoted = quote(cn_filename)
     headers = {
-        # 兜底（给不支持 filename* 的客户端）
-        "Content-Disposition": f"attachment; filename=\"tools.csv\"; filename*=UTF-8''{quoted}"
+        "Content-Disposition": f"attachment; filename=\"tools.xlsx\"; filename*=UTF-8''{quoted}"
     }
-    csv_bytes = buf.getvalue().encode("utf-8-sig")  # ✅ Excel 打开中文不乱码
+
     return Response(
-        content=csv_bytes,
-        media_type="text/csv; charset=utf-8",
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
 
