@@ -46,15 +46,27 @@
 # else:
 #     print("Target route not found:", target_method, target_path)
 
-
+import inspect
 from fastapi.routing import APIRoute
 from fastapi.dependencies.models import Dependant
 from app.main import app
 
 
+
 target_path = "/tools/{tool_id}/quantity"
 target_method = "PATCH"
 
+hits = []
+for r in app.routes:
+    if isinstance(r, APIRoute) and r.path == target_path and target_method in r.methods:
+        ep = r.endpoint
+        hits.append((id(ep), ep.__code__.co_filename, ep.__code__.co_firstlineno, ep.__name__))
+
+print("HITS =", len(hits))
+for i, h in enumerate(hits, 1):
+    print(i, h)
+
+print("-----------------------------------------")
 
 def callable_name(obj) -> str:
     """更稳地拿到可调用对象的名字（函数 / 类实例 / lambda 等）。"""
@@ -82,15 +94,24 @@ def print_dependant(dep: Dependant, indent: int = 0):
 for r in app.routes:
     if isinstance(r, APIRoute) and r.path == target_path and target_method in r.methods:
         print("=== Route Detail ===")
-        print("path:", r.path)
-        print("methods:", r.methods)
-        print("name:", r.name)
-        print("endpoint:", callable_name(r.endpoint))
-        print("response_model:", r.response_model)
+        ep = r.endpoint
+        print("endpoint object:", ep)
+        print("endpoint id:", hex(id(ep)))
+        print("defined in:", ep.__code__.co_filename)
+        print("first line:", ep.__code__.co_firstlineno)
 
-        print("path_params:", [p.name for p in r.dependant.path_params])
-        print("query_params:", [p.name for p in r.dependant.query_params])
-        print("body_params:", [p.name for p in r.dependant.body_params])
+        print("\n--- source snippet ---")
+        src = inspect.getsource(ep)
+        print(src)
+        # print("path:", r.path)
+        # print("methods:", r.methods)
+        # print("name:", r.name)
+        # print("endpoint:", callable_name(r.endpoint))
+        # print("response_model:", r.response_model)
+        #
+        # print("path_params:", [p.name for p in r.dependant.path_params])
+        # print("query_params:", [p.name for p in r.dependant.query_params])
+        # print("body_params:", [p.name for p in r.dependant.body_params])
 
         print("\n=== Dependency Tree ===")
         # 注意：r.dependant 本身代表“这个路由函数的依赖集合”

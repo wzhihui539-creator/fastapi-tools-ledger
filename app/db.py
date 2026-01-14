@@ -18,10 +18,10 @@ def get_session():
     except HTTPException:
         # ✅ 业务/鉴权错误：直接抛出，不做 rollback（通常没必要）
         raise
-    except Exception:
+    except Exception as e:
         # ✅ 其他异常：更像程序错误/DB错误，回滚更合理
         session.rollback()
-        print("rollback")
+        print("rollback:", type(e), e)
         raise
     finally:
         session.close()

@@ -10,7 +10,7 @@ from app.routers import auth, tools, movements
 
 class Settings(BaseSettings):
     # 声明.env里会出现的字段
-    secret_key: str
+    secret_key: str= "dev_secret"
     access_token_expire_minutes: int = 120
 
     # v2 写法：指定 env 文件 + 允许额外字段也不报错（可选）
